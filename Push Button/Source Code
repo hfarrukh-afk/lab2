@@ -1,0 +1,102 @@
+#include <stdint.h>
+
+/* --- Bases (STM32L4R5) --- */
+#define PERIPH_BASE        0x40000000UL
+#define AHB2PERIPH_BASE    (PERIPH_BASE + 0x08000000UL)
+#define APB2PERIPH_BASE    (PERIPH_BASE + 0x00010000UL)
+
+#define RCC_BASE           (0x40021000UL)
+#define GPIOB_BASE         (AHB2PERIPH_BASE + 0x0400UL)
+#define GPIOC_BASE         (AHB2PERIPH_BASE + 0x0800UL)
+#define SYSCFG_BASE        (APB2PERIPH_BASE + 0x0000UL)
+#define EXTI_BASE          (0x40010400UL)
+
+/* --- Typedefs --- */
+typedef struct {                         /* RCC (only what we use) */
+  uint32_t _r0[19];
+  volatile uint32_t AHB2ENR;
+  volatile uint32_t AHB3ENR;
+  uint32_t _r1;
+  volatile uint32_t APB1ENR1;
+  volatile uint32_t APB1ENR2;
+  volatile uint32_t APB2ENR;
+} RCC_TypeDef;
+
+typedef struct {                         /* GPIO */
+  volatile uint32_t MODER, OTYPER, OSPEEDR, PUPDR;
+  volatile uint32_t IDR, ODR, BSRR, LCKR, AFRL, AFRH, BRR;
+} GPIO_TypeDef;
+
+typedef struct {                         /* SYSCFG */
+  volatile uint32_t MEMRMP, CFGR1, EXTICR[4], SCSR, CFGR2, SWPR, SKR;
+} SYSCFG_TypeDef;
+
+typedef struct {                         /* EXTI */
+  volatile uint32_t IMR1, EMR1, RTSR1, FTSR1, SWIER1, PR1;
+  uint32_t _r0[2];
+  volatile uint32_t IMR2, EMR2, RTSR2, FTSR2, SWIER2, PR2;
+} EXTI_TypeDef;
+
+/* --- Instances --- */
+#define RCC     ((RCC_TypeDef*)RCC_BASE)
+#define GPIOB   ((GPIO_TypeDef*)GPIOB_BASE)
+#define GPIOC   ((GPIO_TypeDef*)GPIOC_BASE)
+#define SYSCFG  ((SYSCFG_TypeDef*)SYSCFG_BASE)
+#define EXTI    ((EXTI_TypeDef*)EXTI_BASE)
+
+/* --- NVIC --- */
+#define NVIC_ISER1         (*(volatile uint32_t*)0xE000E104UL) /* IRQ 32..63 */
+#define EXTI15_10_IRQn     40U
+
+/* --- Pins --- */
+#define LED_PIN 7U      /* PB7 (blue) */
+#define BTN_PIN 13U     /* PC13 */
+
+/* --- Setup --- */
+static void gpio_init(void){
+  /* Clocks */
+  RCC->AHB2ENR |= (1UL<<1) | (1UL<<2);       /* GPIOB, GPIOC */
+
+  /* PB7 output, start OFF */
+  GPIOB->MODER &= ~(3UL<<(LED_PIN*2));
+  GPIOB->MODER |=  (1UL<<(LED_PIN*2));
+  GPIOB->ODR   &= ~(1UL<<LED_PIN);
+
+  /* PC13 input + PULL-DOWN (active-high button) */
+  GPIOC->MODER &= ~(3UL<<(BTN_PIN*2));
+  GPIOC->PUPDR &= ~(3UL<<(BTN_PIN*2));
+  GPIOC->PUPDR |=  (2UL<<(BTN_PIN*2));       /* 10: pull-down */
+}
+
+static void exti13_init_rising(void){
+  /* SYSCFG clock */
+  RCC->APB2ENR |= (1UL<<0);
+
+  /* Route EXTI13 to Port C (EXTICR4 bits [7:4]) */
+  SYSCFG->EXTICR[3] &= ~(0xFUL<<4);
+  SYSCFG->EXTICR[3] |=  (0x2UL<<4);          /* 0x2 = Port C */
+
+  /* Clean any stale pending */
+  EXTI->PR1 = (1UL<<13);
+
+  /* RISING only (press -> high), unmask */
+  EXTI->RTSR1 |=  (1UL<<13);
+  EXTI->FTSR1 &= ~(1UL<<13);
+  EXTI->IMR1  |=  (1UL<<13);
+
+  /* NVIC enable EXTI15_10 */
+  NVIC_ISER1 = (1UL << (EXTI15_10_IRQn - 32U));
+}
+
+/* --- ISR --- */
+void EXTI15_10_IRQHandler(void){
+  if (EXTI->PR1 & (1UL<<13)){
+    GPIOB->ODR ^= (1UL<<LED_PIN);   /* toggle PB7 */
+    EXTI->PR1   = (1UL<<13);        /* clear pending */
+  }
+}
+
+int main(void){
+  gpio_init();
+  exti13_init_rising();
+  while(1){ __asm volatile("wfi"); }
