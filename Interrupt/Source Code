@@ -1,0 +1,153 @@
+
+#include <stdint.h>
+
+/* ==== Base addresses (STM32L4R5) ==== */
+#define PERIPH_BASE        0x40000000UL
+#define AHB2PERIPH_BASE    (PERIPH_BASE + 0x08000000UL)
+#define APB1PERIPH_BASE    (PERIPH_BASE + 0x00000000UL)
+#define APB2PERIPH_BASE    (PERIPH_BASE + 0x00010000UL)
+
+#define RCC_BASE           (PERIPH_BASE + 0x00021000UL)
+#define GPIOB_BASE         (AHB2PERIPH_BASE + 0x0400UL)
+#define GPIOC_BASE         (AHB2PERIPH_BASE + 0x0800UL)
+#define TIM4_BASE          (APB1PERIPH_BASE + 0x00000800UL)
+#define SYSCFG_BASE        (APB2PERIPH_BASE + 0x00000000UL)
+#define EXTI_BASE          (0x40010400UL)
+
+/* ==== RCC ==== */
+#define RCC_AHB2ENR        (*(volatile uint32_t*)(RCC_BASE + 0x4C))
+#define RCC_APB1ENR1       (*(volatile uint32_t*)(RCC_BASE + 0x58))
+#define RCC_APB2ENR        (*(volatile uint32_t*)(RCC_BASE + 0x60))
+
+/* ==== GPIO ==== */
+typedef struct {
+  volatile uint32_t MODER, OTYPER, OSPEEDR, PUPDR;
+  volatile uint32_t IDR, ODR, BSRR, LCKR, AFRL, AFRH, BRR;
+} GPIO_TypeDef;
+#define GPIOB ((GPIO_TypeDef*)GPIOB_BASE)
+#define GPIOC ((GPIO_TypeDef*)GPIOC_BASE)
+
+/* ==== TIM4 ==== */
+typedef struct {
+  volatile uint32_t CR1,CR2,SMCR,DIER,SR,EGR,CCMR1,CCMR2,CCER,CNT,PSC,ARR,RCR,CCR1,CCR2,CCR3,CCR4,BDTR,DCR,DMAR;
+} TIM_TypeDef;
+#define TIM4 ((TIM_TypeDef*)TIM4_BASE)
+
+/* ==== SYSCFG / EXTI ==== */
+typedef struct { volatile uint32_t MEMRMP,CFGR1,EXTICR[4],SCSR,CFGR2,SWPR,SKR; } SYSCFG_TypeDef;
+typedef struct { volatile uint32_t IMR1,EMR1,RTSR1,FTSR1,SWIER1,PR1,_r0[2],IMR2,EMR2,RTSR2,FTSR2,SWIER2,PR2; } EXTI_TypeDef;
+#define SYSCFG ((SYSCFG_TypeDef*)SYSCFG_BASE)
+#define EXTI   ((EXTI_TypeDef*)EXTI_BASE)
+
+/* ==== NVIC ==== */
+#define NVIC_ISER0 (*(volatile uint32_t*)0xE000E100UL) /* IRQ 0..31  */
+#define NVIC_ISER1 (*(volatile uint32_t*)0xE000E104UL) /* IRQ 32..63 */
+#define TIM4_IRQn_Number   30U
+#define EXTI15_10_IRQn_Num 40U
+
+/* ==== LED pins ==== */
+#define LED_G_PORT  GPIOC
+#define LED_G_PIN   7U      /* PC7 */
+#define LED_B_PORT  GPIOB
+#define LED_B_PIN   7U      /* PB7 */
+#define LED_R_PORT  GPIOB
+#define LED_R_PIN   14U     /* PB14 */
+
+/* ==== Button ==== */
+#define BTN_PIN     13U     /* PC13 active-high */
+
+/* ==== Timer config: 1 Hz from 16 MHz ==== */
+#define PSC_1KHZ  15999U    /* 16MHz/(15999+1)=1kHz */
+#define ARR_1S    999U      /* 1000 ticks = 1s */
+
+/* ==== State ==== */
+typedef struct { GPIO_TypeDef* port; uint8_t pin; } led_t;
+static const led_t SEQ[3] = {
+  { LED_G_PORT, LED_G_PIN },
+  { LED_B_PORT, LED_B_PIN },
+  { LED_R_PORT, LED_R_PIN }
+};
+static volatile uint8_t seq_idx = 0;     /* 0:G,1:B,2:R */
+static volatile uint8_t paused  = 0;     /* 1 while button pressed */
+
+/* ==== Helpers ==== */
+static inline void leds_off(void){
+  LED_G_PORT->BSRR = (1U<<LED_G_PIN) << 16;
+  LED_B_PORT->BSRR = (1U<<LED_B_PIN) << 16;
+  LED_R_PORT->BSRR = (1U<<LED_R_PIN) << 16;
+}
+static inline void led_on(GPIO_TypeDef* port, uint32_t pin){ port->BSRR = (1U<<pin); }
+
+/* ==== Init ==== */
+static void gpio_init(void){
+  RCC_AHB2ENR |= (1U<<1) | (1U<<2);        /* GPIOBEN | GPIOCEN */
+
+  /* Outputs: PC7, PB7, PB14 */
+  GPIOC->MODER &= ~(3U<<(LED_G_PIN*2));
+  GPIOC->MODER |=  (1U<<(LED_G_PIN*2));
+  GPIOB->MODER &= ~((3U<<(LED_B_PIN*2)) | (3U<<(LED_R_PIN*2)));
+  GPIOB->MODER |=  ((1U<<(LED_B_PIN*2)) | (1U<<(LED_R_PIN*2)));
+
+  /* Button PC13 input + pull-down (active-high) */
+  GPIOC->MODER &= ~(3U<<(BTN_PIN*2));
+  GPIOC->PUPDR &= ~(3U<<(BTN_PIN*2));
+  GPIOC->PUPDR |=  (2U<<(BTN_PIN*2));      /* 10: pull-down */
+
+  leds_off();
+  led_on(SEQ[seq_idx].port, SEQ[seq_idx].pin);  /* start on GREEN */
+}
+
+static void tim4_init_1hz(void){
+  RCC_APB1ENR1 |= (1U<<2);                 /* TIM4EN */
+  TIM4->CR1 = 0;
+  TIM4->PSC = PSC_1KHZ;                    /* 1 kHz CNT */
+  TIM4->ARR = ARR_1S;                      /* 1 s period */
+  TIM4->EGR = 1U;                          /* UG: load PSC/ARR */
+  TIM4->SR  = 0U;                          /* clear flags */
+  TIM4->DIER = 1U;                         /* UIE */
+  NVIC_ISER0 = (1U<<TIM4_IRQn_Number);     /* NVIC enable TIM4 (30) */
+  TIM4->CR1 |= 1U;                         /* CEN */
+}
+
+static void exti_pc13_init_both_edges(void){
+  RCC_APB2ENR |= (1U<<0);                  /* SYSCFGEN */
+  /* Map EXTI13 -> Port C (EXTICR4 bits [7:4]) */
+  SYSCFG->EXTICR[3] &= ~(0xFU<<4);
+  SYSCFG->EXTICR[3] |=  (0x2U<<4);         /* 0x2 = Port C */
+
+  EXTI->PR1   = (1U<<13);                  /* clear stale pending */
+  EXTI->RTSR1 |= (1U<<13);                 /* rising: press */
+  EXTI->FTSR1 |= (1U<<13);                 /* falling: release */
+  EXTI->IMR1  |= (1U<<13);                 /* unmask */
+
+  NVIC_ISER1 = (1U<<(EXTI15_10_IRQn_Num-32U)); /* enable EXTI15_10 (40) */
+}
+
+/* ==== ISRs ==== */
+void TIM4_IRQHandler(void){
+  if (TIM4->SR & 1U){
+    TIM4->SR = 0U;                         /* clear UIF */
+    if (!paused){
+      seq_idx = (uint8_t)((seq_idx + 1U) % 3U);
+      leds_off();
+      led_on(SEQ[seq_idx].port, SEQ[seq_idx].pin);
+    }
+  }
+}
+
+void EXTI15_10_IRQHandler(void){
+  if (EXTI->PR1 & (1U<<13)){
+    /* Read current level to decide pause state:
+       active-high: 1=pressed, 0=released */
+    paused = (GPIOC->IDR & (1U<<BTN_PIN)) ? 1U : 0U;
+    EXTI->PR1 = (1U<<13);                  /* clear pending */
+  }
+}
+
+/* ==== Main ==== */
+int main(void){
+  gpio_init();
+  tim4_init_1hz();
+  exti_pc13_init_both_edges();
+  while(1){ __asm volatile("wfi"); }
+}
