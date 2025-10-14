@@ -18,3 +18,6 @@ Assuming the microcontroller clock (f_CLK) is 16 MHz:
 Choose: PSC = 15999, ARR = 999
 Then: f_INT = 16,000,000 / ((15,999 + 1) * (999 + 1)) = 1.0 Hz
 Result: Timer 4 generates one interrupt every 1 second.
+
+
+P.S: using GPT for assistance to better learn and absorb the info. Have submitted proof of all self-work done.
